@@ -4,5 +4,4 @@ composer.lock
 *.log
 .idea/
 .vscode/
-*.zip
 node_modules/
