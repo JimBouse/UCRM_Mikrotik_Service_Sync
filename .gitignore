@@ -1,0 +1,8 @@
+vendor/
+composer.lock
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.zip
+node_modules/

@@ -1,0 +1,198 @@
+# ============================================
+# Script: update_pcq
+# Purpose: Create / maintain PCQ speed plans
+#          based on address-lists named
+#          Speed_Package-XX/YY
+# ============================================
+# NAT-friendly (connection-mark based)
+# Separate UP / DOWN Simple Queues
+# Robust cleanup using queue name parsing
+# ============================================
+
+:local logPrefix "update_pcq: "
+
+:log info ($logPrefix . "Starting...")
+
+# ---------- Helper: extract download/upload from list name ----------
+:local parseSpeeds do={
+    :local name $1
+    :local prefix "Speed_Package-"
+    :if ([:pick $name 0 [:len $prefix]] != $prefix) do={ :return "" }
+
+    :local speeds [:pick $name [:len $prefix] [:len $name]]
+    :local slashPos [:find $speeds "/"]
+    :if ($slashPos = nil) do={ :return "" }
+
+    :local dl [:pick $speeds 0 $slashPos]
+    :local ul [:pick $speeds ($slashPos + 1) [:len $speeds]]
+
+    :if ([:tonum $dl] = nil || [:tonum $ul] = nil) do={ :return "" }
+
+    :return ($dl . "/" . $ul)
+}
+
+# ---------- Collect unique active packages ----------
+:local activePackages ({})
+:foreach entry in=[/ip firewall address-list find where list~"^Speed_Package-"] do={
+    :local listName [/ip firewall address-list get $entry list]
+    :local speeds [$parseSpeeds $listName]
+    :if ($speeds != "") do={
+        :set ($activePackages->$speeds) $listName
+    }
+}
+
+:log info ($logPrefix . "Found " . [:len $activePackages] . " active speed packages")
+
+# ---------- Create missing infrastructure ----------
+:foreach speeds,listName in=$activePackages do={
+
+    :local slashPos [:find $speeds "/"]
+    :local dl [:pick $speeds 0 $slashPos]
+    :local ul [:pick $speeds ($slashPos + 1) [:len $speeds]]
+
+    :local connMark    ("sp-" . $dl . "-" . $ul)
+    :local pktDown     ($connMark . "-down")
+    :local pktUp       ($connMark . "-up")
+    :local pcqDown     ("pcq-" . $connMark . "-down")
+    :local pcqUp       ("pcq-" . $connMark . "-up")
+    :local simpleUp    ("SP-" . $dl . "-" . $ul . "-UP")
+    :local simpleDown  ("SP-" . $dl . "-" . $ul . "-DOWN")
+
+    :log info ($logPrefix . "Processing " . $listName)
+
+    # 1. PCQ Queue Types
+    :if ([:len [/queue type find where name=$pcqDown]] = 0) do={
+        /queue type add name=$pcqDown kind=pcq \
+            pcq-rate=($dl . "M") pcq-classifier=dst-address \
+            pcq-limit=50KiB pcq-total-limit=2000KiB
+        :log info ($logPrefix . "Created " . $pcqDown)
+    }
+    :if ([:len [/queue type find where name=$pcqUp]] = 0) do={
+        /queue type add name=$pcqUp kind=pcq \
+            pcq-rate=($ul . "M") pcq-classifier=src-address \
+            pcq-limit=50KiB pcq-total-limit=2000KiB
+        :log info ($logPrefix . "Created " . $pcqUp)
+    }
+
+    # 2. Mangle - Connection mark (client side only - NAT friendly)
+    :if ([:len [/ip firewall mangle find where new-connection-mark=$connMark and comment~"update_pcq"]] = 0) do={
+        /ip firewall mangle
+        add chain=prerouting action=mark-connection new-connection-mark=$connMark \
+            connection-state=new src-address-list=$listName \
+            passthrough=yes comment=("update_pcq " . $connMark . " conn")
+        :log info ($logPrefix . "Created connection mark " . $connMark)
+    }
+
+    # 3. Mangle - Packet marks
+    :if ([:len [/ip firewall mangle find where new-packet-mark=$pktDown and comment~"update_pcq"]] = 0) do={
+        /ip firewall mangle
+        # Download - connection-mark only (works with NAT)
+        add chain=prerouting action=mark-packet new-packet-mark=$pktDown \
+            connection-mark=$connMark \
+            passthrough=yes comment=("update_pcq " . $pktDown)
+
+        # Upload
+        add chain=prerouting action=mark-packet new-packet-mark=$pktUp \
+            connection-mark=$connMark src-address-list=$listName \
+            passthrough=yes comment=("update_pcq " . $pktUp)
+
+        :log info ($logPrefix . "Created packet marks for " . $connMark)
+    }
+
+    # 4. Simple Queues - SEPARATE UP / DOWN + force target
+    :if ([:len [/queue simple find where name=$simpleUp]] = 0) do={
+        /queue simple add name=$simpleUp \
+            packet-marks=$pktUp \
+            queue=$pcqUp \
+            max-limit=("0/0") \
+            target=0.0.0.0/0 \
+            comment=("update_pcq " . $listName . " UP")
+        :log info ($logPrefix . "Created " . $simpleUp)
+    } else={
+        # Ensure all properties match on existing queues
+        /queue simple set [find name=$simpleUp] \
+            packet-marks=$pktUp \
+            queue=$pcqUp \
+            max-limit=("0/0") \
+            target=0.0.0.0/0 \
+            comment=("update_pcq " . $listName . " UP")
+    }
+
+    :if ([:len [/queue simple find where name=$simpleDown]] = 0) do={
+        /queue simple add name=$simpleDown \
+            packet-marks=$pktDown \
+            queue=("default-small/" . $pcqDown) \
+            max-limit=("0/0") \
+            target=0.0.0.0/0 \
+            comment=("update_pcq " . $listName . " DOWN")
+        :log info ($logPrefix . "Created " . $simpleDown)
+    } else={
+        # Ensure all properties match on existing queues
+        /queue simple set [find name=$simpleDown] \
+            packet-marks=$pktDown \
+            queue=("default-small/" . $pcqDown) \
+            max-limit=("0/0") \
+            target=0.0.0.0/0 \
+            comment=("update_pcq " . $listName . " DOWN")
+    }
+}
+
+# ---------- Cleanup: remove orphaned PCQ infrastructure ----------
+:log info ($logPrefix . "Starting cleanup of orphaned packages...")
+
+:foreach sq in=[/queue simple find where comment~"update_pcq"] do={
+    :local sqName [/queue simple get $sq name]
+
+    # Expected formats: SP-1000-50-UP  or  SP-1000-50-DOWN
+    :if ([:pick $sqName 0 3] = "SP-") do={
+        :local rest [:pick $sqName 3 [:len $sqName]]
+
+        # Remove -UP or -DOWN from the end
+        :local cleanName $rest
+        :if ([:pick $rest ([:len $rest] - 3) [:len $rest]] = "-UP") do={
+            :set cleanName [:pick $rest 0 ([:len $rest] - 3)]
+        }
+        :if ([:pick $rest ([:len $rest] - 5) [:len $rest]] = "-DOWN") do={
+            :set cleanName [:pick $rest 0 ([:len $rest] - 5)]
+        }
+
+        # cleanName should now be like "1000-50"
+        :local dashPos [:find $cleanName "-"]
+        :if ($dashPos != nil) do={
+            :local dl [:pick $cleanName 0 $dashPos]
+            :local ul [:pick $cleanName ($dashPos + 1) [:len $cleanName]]
+            :local expectedList ("Speed_Package-" . $dl . "/" . $ul)
+
+            :local memberCount [:len [/ip firewall address-list find where list=$expectedList]]
+
+            :if ($memberCount = 0) do={
+                :log warning ($logPrefix . "Removing orphaned queue " . $sqName . " (list " . $expectedList . " is empty)")
+
+                :local connMark   ("sp-" . $dl . "-" . $ul)
+                :local pktDown    ($connMark . "-down")
+                :local pktUp      ($connMark . "-up")
+                :local pcqDown    ("pcq-" . $connMark . "-down")
+                :local pcqUp      ("pcq-" . $connMark . "-up")
+                :local baseName   ("SP-" . $dl . "-" . $ul)
+
+                /queue simple remove $sq
+
+                # Only clean related objects when BOTH UP and DOWN queues are gone
+                :if ([:len [/queue simple find where name~($baseName)]] = 0) do={
+                    /ip firewall mangle remove [find where comment~("update_pcq " . $connMark)]
+                    /ip firewall mangle remove [find where comment~("update_pcq " . $pktDown)]
+                    /ip firewall mangle remove [find where comment~("update_pcq " . $pktUp)]
+
+                    :if ([:len [/queue type find where name=$pcqDown]] > 0) do={
+                        /queue type remove [find where name=$pcqDown]
+                    }
+                    :if ([:len [/queue type find where name=$pcqUp]] > 0) do={
+                        /queue type remove [find where name=$pcqUp]
+                    }
+                }
+            }
+        }
+    }
+}
+
+:log info ($logPrefix . "Finished.")

@@ -1,0 +1,16 @@
+{
+  "name": "lagomar/mikrotik-service-sync",
+  "description": "Mikrotik Service Suspension Sync Plugin for UCRM",
+  "version": "1.1.0",
+  "license": "MIT",
+  "autoload": {
+    "psr-4": {
+      "Ubnt\\Plugins\\MikrotikSync\\": "src/"
+    }
+  },
+  "require": {
+    "php": ">=7.2.5",
+    "php-di/php-di": "^7.0",
+    "ubnt/ucrm-plugin-sdk": "0.13.0"
+  }
+}

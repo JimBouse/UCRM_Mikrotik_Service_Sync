@@ -1,0 +1,114 @@
+{
+  "version": "1",
+  "information": {
+    "name": "mikrotik-service-sync",
+    "displayName": "Mikrotik Service Sync",
+    "description": "Automatically synchronize UCRM service status with Mikrotik address lists for service suspension and activation using Mikrotik REST API. Processes webhooks for service events and runs daily sync to ensure all services are in the correct state.",
+    "url": "https://localhost/mikrotik-service-sync",
+    "version": "1.2.69",
+    "author": "Jim Bouse - jimbouse.com",
+    "unmsVersionCompliancy": {
+      "min": "2.1.0",
+      "max": null
+    }
+  },
+  "configuration": [
+    {
+      "key": "mikrotikHosts",
+      "label": "Mikrotik IP Addresses",
+      "description": "Comma-separated list of IP addresses or hostnames (e.g., '192.168.1.1, 192.168.1.2, 192.168.1.3')",
+      "type": "text",
+      "required": 1
+    },
+    {
+      "key": "mikrotikUsername",
+      "label": "Mikrotik Username",
+      "description": "Username for Mikrotik API access",
+      "type": "text",
+      "required": 1
+    },
+    {
+      "key": "mikrotikPassword",
+      "label": "Mikrotik Password",
+      "description": "Password for Mikrotik API access",
+      "type": "password",
+      "required": 1
+    },
+    {
+      "key": "mikrotikPort",
+      "label": "Mikrotik REST API Port",
+      "description": "REST API port (443 for HTTPS recommended, 80 for HTTP only in test environments)",
+      "type": "text",
+      "required": 1
+    },
+    {
+      "key": "enableSsl",
+      "label": "Enable HTTPS",
+      "description": "Enable HTTPS for secure REST API connection (recommended - requires www-ssl service enabled on Mikrotik)",
+      "type": "checkbox",
+      "required": 0
+    },
+    {
+      "key": "ignoreCertificateErrors",
+      "label": "Ignore Certificate Errors",
+      "description": "Ignore SSL certificate validation errors (useful for self-signed certificates)",
+      "type": "checkbox",
+      "required": 0
+    },
+    {
+      "key": "dhcpServerName",
+      "label": "DHCP Server Name",
+      "description": "Name of the DHCP server in Mikrotik (e.g., 'default'). Leave blank to search all DHCP leases regardless of server.",
+      "type": "text",
+      "required": 0
+    },
+    {
+      "key": "serviceActiveListName",
+      "label": "Service Active Address List Name",
+      "description": "Address list name for active services. Leave blank to use default 'Service_Active'",
+      "type": "text",
+      "required": 0
+    },
+    {
+      "key": "serviceSuspendListName",
+      "label": "Service Suspend Address List Name",
+      "description": "Address list name for suspended services. Leave blank to use default 'Service_Suspend'",
+      "type": "text",
+      "required": 0
+    },
+    {
+      "key": "serviceEndListName",
+      "label": "Service End Address List Name",
+      "description": "Address list name for ended services. Leave blank to use default 'Service_End'",
+      "type": "text",
+      "required": 0
+    },
+    {
+      "key": "searchStringKey",
+      "label": "UCRM Serial or MAC Custom Attribute Key",
+      "description": "The custom attribute key/ID number on service profile containing the serial or MAC to lookup in DHCP (e.g., 5, 12, etc.)",
+      "type": "text",
+      "required": 1
+    },
+    {
+      "key": "searchColumn",
+      "label": "DHCP Lease Column to Search",
+      "description": "Choose which column in the Mikrotik DHCP lease table to search for the device",
+      "type": "choice",
+      "required": 1,
+      "choices": {
+        "Active MAC": "active-mac-address",
+        "Active IP": "active-address",
+        "Option 82 - Active Agent Circuit ID": "active-agent-circuit-id",
+        "Option 82 - Active gent Remote ID": "active-agent-remote-id"
+      }
+    },
+    {
+      "key": "enableDebugLogging",
+      "label": "Enable Debug Logging",
+      "description": "Enable detailed debug logging for troubleshooting",
+      "type": "checkbox",
+      "required": 0
+    }
+  ]
+}
