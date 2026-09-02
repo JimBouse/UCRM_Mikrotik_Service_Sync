@@ -48,7 +48,7 @@ Automatically synchronize UCRM service status with Mikrotik address lists for se
 3. In the plugin configuration, set "Search Custom Attribute" to the numeric ID (e.g., `5`, `12`)
 4. Save
 
-### Step 2: Download and Extract
+### Step 2: Download
 
 Upload the plugin ZIP to the UCRM Admin > Plugins page in UCRM.
 
