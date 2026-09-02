@@ -7,19 +7,21 @@ Automatically synchronize UCRM service status with Mikrotik address lists for se
 - **Real-time Webhook Processing**: Responds immediately to service status changes (add, edit, suspend, end, etc.)
 - **Daily Synchronization**: Automated 24-hour sync to ensure all services are in the correct address list
 - **Flexible Device Identification**: Supports multiple search methods:
-  - Option 82 Circuit ID (default, for ONT serial numbers)
+  - Option 82 Circuit ID
   - Option 82 Remote ID
   - Active MAC address
   - Active IP address
 - **Custom Attribute Support**: Uses a configurable service custom attribute to identify devices
-- **Mikrotik DHCP Lookup**: Queries Mikrotik DHCP leases to find service IP addresses using flexible search columns
+- **Mikrotik DHCP Lookup**: Uses Mikrotik REST to query DHCP leases to find service IP addresses
 - **Address List Management**: Automatically manages three address lists:
   - `Service_Active`: Active/running services
   - `Service_Suspend`: Suspended services (non-payment)
   - `Service_End`: Ended/archived services
-- **Detailed Logging**: Comprehensive logging for debugging and audit trails
-- **Duplicate Prevention**: Prevents duplicate webhook processing within 24 hours
-- **Multi-Mikrotik Support**: Redundancy across multiple Mikrotik devices with failover
+  **Unknown IP Address List**
+  - `Service_Unknown`: All remaining and *unknown* DHCP lease entries are added to this list to catch stragglers.
+- **Automatically Create PCQ Queues**: Automatically build speed queues for each speed package in UCRM
+
+- **Multi-Mikrotik Support**: Multiple headend routers can be managed from one UCRM instance.  Since it is based on the DHCP leases, each address list entry is applied to only the mikrotik router it should be on.
 
 ## Requirements
 
@@ -32,22 +34,23 @@ Automatically synchronize UCRM service status with Mikrotik address lists for se
 
 ## Installation
 
-### Step 1: Download and Extract
+### Step 1: Configure Service Custom Attribute
 
-Download the plugin ZIP file and extract it into your UCRM plugins directory:
+1. In UCRM, navigate to Other > Custom Attributes
+2. Click "+ Custom Attribute" button.
+   - Name: Some descriptive name such as Device MAC, ONT Serial, or Device IP
+   - Attribute Type: Service
+   - Type: Text
+   - Visible in Client Zone: No
 
-```bash
-unzip MikrotikServiceSync.zip -d /path/to/ucrm/plugins/
-```
+3. After clicking save, note the numeric Attribute ID at the end of the URL.  You will need it when configuring the plugin.
+   
+3. In the plugin configuration, set "Search Custom Attribute" to the numeric ID (e.g., `5`, `12`)
+4. Save
 
-### Step 2: Install Dependencies
+### Step 2: Download and Extract
 
-Navigate to the plugin directory and install Composer dependencies:
-
-```bash
-cd /path/to/ucrm/plugins/mikrotik-service-sync
-composer install
-```
+Upload the plugin ZIP to the UCRM Admin > Plugins page in UCRM.
 
 ### Step 3: Configure Plugin
 
@@ -60,41 +63,31 @@ In UCRM Admin > Plugins > Installed Plugins > Mikrotik Service Suspension Sync:
    - API Port: Default is 443 for HTTPS. For unencrypted connections use 8728, for SSL use 8729 - applies to all instances
 
 2. **DHCP Server Settings**
-   - DHCP Server Name: Name of your DHCP server in Mikrotik (e.g., "default"). Leave blank to search all DHCP servers and include all matching leases in the address list regardless of which server they're on.
+   - DHCP Server Name: Name of your DHCP server in Mikrotik. Leave blank to search all DHCP servers and include all matching leases in the address list regardless of which server they're on.
 
 3. **Address List Names**
    - Service Active List: Name for active service addresses (default: "Service_Active")
    - Service Suspend List: Name for suspended service addresses (default: "Service_Suspend")
    - Service End List: Name for ended service addresses (default: "Service_End")
 
-4. **Search Configuration**
-   - Search Custom Attribute: The numeric custom attribute ID on the service profile containing the device identifier (serial number, MAC address, etc.) to search for in Mikrotik DHCP leases. This is the attribute ID/key number, not the attribute name (e.g., enter `5` or `12` if your attribute ID is 5 or 12)
-   - DHCP Lease Column to Search: Which Mikrotik DHCP lease field to search:
-     - `Active MAC`: Search by device MAC address
-     - `Active IP`: Search by device IP address
-     - `Option 82 - Circuit ID`: Search by DHCP option 82 circuit ID (default)
-     - `Option 82 - Remote ID`: Search by DHCP option 82 remote ID
+4. **Custom Attribute Key**
+   - Enter the numeric value of the recently created Custom Attribute
 
-5. **Optional Settings**
+5. **Choose the field to search in the Mikrotik DHCP Leases**
+   Each setup is different.  You will need to see what unique identifier you want to use from your DHCP lease list.
+   - Active MAC - The MAC address of the lease
+   - Active IP - The IP of the lease (use this with caution because it could change)
+   - Option 82 - Active Agent Circuit ID - The circuit ID that is passed along when using Option 82
+   - Option 82 - Active Agent Remote ID - The remote ID that is passed along when using Option 82
+
+6. **Optional Settings**
    - Enable HTTPS/SSL (TLS): Check to use encrypted connections to Mikrotik (enabled by default, use port 443 or 8729)
    - Ignore Certificate Errors: Check to allow self-signed certificates (only with SSL enabled)
    - Enable Debug Logging: Check to enable detailed debug output
 
-### Step 4: Configure Service Custom Attribute
 
-1. In UCRM, navigate to Settings > Service
-2. Create or configure a custom attribute for device identifier:
-   - Note the numeric Attribute ID (shown in the URL or attribute list)
-   - Type: Text
-   - Enter the appropriate value for each service:
-     - If searching by MAC: Enter the device MAC address
-     - If searching by serial: Enter the device serial number
-     - If searching by option 82: Enter the circuit ID or remote ID
-     - If searching by IP: Enter the device IP address
-3. In the plugin configuration, set "Search Custom Attribute" to the numeric ID (e.g., `5`, `12`)
-4. Save
 
-### Step 5: Setup Mikrotik
+### Step 4: Setup Mikrotik
 
 1. Enable API on your Mikrotik device
 2. Create an API user with the following permissions:
@@ -105,102 +98,29 @@ In UCRM Admin > Plugins > Installed Plugins > Mikrotik Service Suspension Sync:
    - **For MAC searching**: MAC addresses are automatically stored by Mikrotik
    - **For IP searching**: IP addresses are automatically stored by Mikrotik
 
+### Step 5: Schedule Daily Sync
+
+In UCRM, create a scheduled task:
+
+1. Admin > Plugins > Mikrotik Service Sync -> Configuration
+2. Set Execution period to 24 hours.
+
+
 ### Step 6: Schedule Daily Sync
 
 In UCRM, create a scheduled task:
 
-1. Admin > Tools > Webhooks > Scheduled Commands
-2. Add New:
-   - Plugin: Mikrotik Service Suspension Sync
-   - Schedule: Daily (configure time)
-   - Command: `php main.php`
-
-## Configuration Examples
-
-### UCRM Plugin Configuration (Searching by Option 82 Circuit ID)
-
-```
-Mikrotik IP Addresses: 192.168.1.1, 192.168.1.2, 192.168.1.3
-Mikrotik Username: ucrm-api
-Mikrotik Password: YourSecurePassword
-Mikrotik API Port: 443
-Enable HTTPS: Checked (default)
-Ignore Certificate Errors: Unchecked (default)
-DHCP Server Name: default
-Service Active List Name: Service_Active
-Service Suspend List Name: Service_Suspend
-Service End List Name: Service_End
-Search Custom Attribute: 5
-DHCP Lease Column to Search: Option 82 - Circuit ID
-Enable Debug Logging: Unchecked
-```
-
-### UCRM Plugin Configuration (Searching by MAC Address)
-
-```
-Mikrotik IP Addresses: 192.168.1.1, 192.168.1.2, 192.168.1.3
-Mikrotik Username: ucrm-api
-Mikrotik Password: YourSecurePassword
-Mikrotik API Port: 443
-Enable HTTPS: Checked (default)
-Ignore Certificate Errors: Unchecked (default)
-DHCP Server Name: default
-Service Active List Name: Service_Active
-Service Suspend List Name: Service_Suspend
-Service End List Name: Service_End
-Search Custom Attribute: 8
-DHCP Lease Column to Search: Active MAC
-Enable Debug Logging: Unchecked
-```
-
-### UCRM Plugin Configuration (All DHCP Servers)
-
-Leave "DHCP Server Name" blank to search all DHCP servers:
-
-```
-Mikrotik IP Addresses: 192.168.1.1, 192.168.1.2, 192.168.1.3
-Mikrotik Username: ucrm-api
-Mikrotik Password: YourSecurePassword
-Mikrotik API Port: 443
-Enable HTTPS: Checked (default)
-Ignore Certificate Errors: Unchecked (default)
-DHCP Server Name: (leave blank)
-Service Active List Name: Service_Active
-Service Suspend List Name: Service_Suspend
-Service End List Name: Service_End
-Search Custom Attribute: 5
-DHCP Lease Column to Search: Option 82 - Circuit ID
-Enable Debug Logging: Unchecked
-```
+1. Admin > Plugins > Mikrotik Service Sync
+2. Copy the Public URL
+3. Admin > Webhook
+4. Click "+ Endpoint"
+5. Paste URL into "URL" field.
+6. Add `service.add`, `service.edit`, `service.postpone`, `service.suspend`, `service.suspend_cancel`, `service.end`, `service.archive`, and `service.delete`
+7. Click "Save"
 
 ### Mikrotik API User Setup
 
-Create the same API user on all Mikrotik instances:
-
-```
-/user add name=ucrm-api password=YourSecurePassword disabled=no
-/user/group/permission set name=full number=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
-/user/aclgroup add name=ucrm-api permissions=full
-/user/aclset name=ucrm-api default-policy=deny target-address-list=address-list policy=read,write
-```
-
-### DHCP Option 82 Configuration (If searching by option 82)
-
-Ensure your Mikrotik DHCP server is configured to use option 82:
-
-```
-/ip/dhcp-server set default use-option-82=yes
-```
-
-### Address List Setup
-
-The plugin automatically manages these address lists. Pre-create them in Mikrotik if needed:
-
-```
-/ip/firewall/address-list add list="Service_Active"
-/ip/firewall/address-list add list="Service_Suspend"
-/ip/firewall/address-list add list="Service_End"
-```
+Create the same API user on all Mikrotik instances and give them full permissions
 
 ## Search Methods
 
@@ -229,20 +149,6 @@ The plugin matches UCRM services to Mikrotik devices by searching for a value fr
 - **Requires**: Nothing special, IP addresses are always available in DHCP leases
 - **Search value**: Device IP address from the service custom attribute
 - **Example**: `192.168.1.100`
-
-## DHCP Server Filtering
-
-The plugin supports flexible DHCP server filtering:
-
-### Specific DHCP Server
-- **Configuration**: Set "DHCP Server Name" to a specific server name (e.g., "default")
-- **Behavior**: Only DHCP leases from that specific server are queried and added to address lists
-- **Use case**: Multi-server setups where you want to isolate services by server
-
-### All DHCP Servers
-- **Configuration**: Leave "DHCP Server Name" blank
-- **Behavior**: The plugin queries all DHCP servers and includes all matching leases in the address list
-- **Use case**: Single server or when you want all matching devices included regardless of server
 
 ## Webhook Events Supported
 
@@ -277,27 +183,7 @@ This allows easy identification of which client and service an address belongs t
 
 ## Multi-Mikrotik Support
 
-The plugin supports multiple Mikrotik instances for redundancy and load distribution:
-
-### DHCP Query Failover
-When looking up a device IP:
-1. Queries the first Mikrotik in the list
-2. If not found, tries the next one
-3. Returns the first IP found
-4. Logs all attempts
-
-### Address List Management
-When adding/removing addresses from firewall lists:
-- **Add**: Adds to all configured Mikrotik instances (ensures synchronization)
-- **Remove**: Removes from all configured Mikrotik instances
-- Success if added to **at least one** instance
-- Partial success is logged as warnings
-
-### Configuration
-- All Mikrotik instances must use **the same username/password** and **port**
-- Each instance can have a different IP address
-- Recommended: 2-3 Mikrotik instances for redundancy
-- Example CSV: `192.168.1.1, 192.168.1.2, 192.168.1.3`
+The plugin supports multiple Mikrotik instances for servicing multiple locations:
 
 ### Logging
 Multi-Mikrotik operations are logged with:
@@ -314,7 +200,7 @@ The plugin supports secure connections to Mikrotik devices using SSL/TLS:
 1. In UCRM Admin > Plugins > Installed Plugins > Mikrotik Service Suspension Sync
 2. Check "Enable SSL (TLS)" to use encrypted connections
 3. Update your API port:
-   - **8729**: Standard Mikrotik SSL/TLS port
+   - **443**: Standard Mikrotik SSL/TLS port
    - **Custom**: If your Mikrotik uses a different SSL port
 
 ### Certificate Verification
@@ -330,14 +216,14 @@ By default, the plugin verifies SSL certificates. For environments with self-sig
 #### Plain TCP Connection (Unencrypted)
 ```
 Enable SSL (TLS): Unchecked
-Mikrotik API Port: 8728
+Mikrotik REST Port: 80
 Ignore Certificate Errors: N/A
 ```
 
 #### SSL Connection with Valid Certificate (Default)
 ```
 Enable SSL (TLS): Checked
-Mikrotik API Port: 443
+Mikrotik REST Port: 443
 Ignore Certificate Errors: Unchecked
 ```
 
@@ -347,21 +233,6 @@ Enable SSL (TLS): Checked
 Mikrotik API Port: 443
 Ignore Certificate Errors: Checked
 ```
-
-### Mikrotik SSL Setup
-
-To enable SSL on your Mikrotik:
-
-1. Generate or install a certificate
-2. Configure the API to use SSL on port 8729:
-   ```
-   /ip/service set api-ssl enabled=yes
-   ```
-3. Verify SSL is listening:
-   ```
-   /ip/service print
-   ```
-4. Test connection: `openssl s_client -connect mikrotik_ip:8729`
 
 ## PCQ Script Management
 
@@ -513,4 +384,4 @@ MIT License
 
 ## Author
 
-LagoMar Networks
+Jim Bouse
