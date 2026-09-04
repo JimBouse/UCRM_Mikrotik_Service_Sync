@@ -131,12 +131,14 @@ The plugin matches UCRM services to Mikrotik devices by searching for a value fr
 - **Requires**: DHCP option 82 to be enabled on Mikrotik
 - **Search value**: Device serial number or circuit ID from the service custom attribute
 - **Example**: `ABK23H4012`
+- **RouterOS encoding**: Older RouterOS returns Option 82 as ASCII. RouterOS 7.23+ REST often returns it as hex (`0x...`, plain hex, or colon-separated bytes). The plugin decodes both so UCRM ASCII values still match.
 
 ### Option 82 - Remote ID
 - **Use when**: Mikrotik DHCP server stores device remote IDs in option 82
 - **Requires**: DHCP option 82 to be enabled on Mikrotik
 - **Search value**: Device remote ID from the service custom attribute
 - **Example**: `REMOTE-12345`
+- **RouterOS encoding**: Same ASCII and hex handling as Circuit ID.
 
 ### Active MAC
 - **Use when**: You want to identify devices by their MAC address
@@ -178,6 +180,12 @@ For active services with speed information, Speed_Package lists include:
 ```
 Speed Package 50Mbps down / 10Mbps up - Client ID: 12, Service ID: 456
 ```
+
+### Traffic shaping / speed override
+
+UCRM can temporarily override a service plan's speeds (`downloadSpeedOverride`, `uploadSpeedOverride`, `trafficShapingOverrideEnabled`, `trafficShapingOverrideEnd`). A `service.edit` webhook with those fields, and the nightly sync, both use the override while it is enabled and not past its end time.
+
+Example from the payload: plan `400/40`, override `1000/40` until `2026-09-08T11:09:56-0500` puts the IP on `Speed_Package-1000/40` instead of `Speed_Package-400/40`. When the override is disabled or expired, the IP goes back to the plan speed list. Webhooks also run `update_pcq` on that Mikrotik so the new PCQ queues exist immediately.
 
 This allows easy identification of which client and service an address belongs to.
 

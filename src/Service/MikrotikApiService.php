@@ -41,65 +41,117 @@ class MikrotikApiService
     public function queryDhcpLeaseByColumn(string $searchValue, string $searchColumn, string $dhcpServerName = ''): ?string
     {
         $this->logger->debug("Starting DHCP REST API query for {$searchColumn}={$searchValue}, server={$dhcpServerName}");
-        
-        // Map search column to DHCP field names
+
         $searchField = $this->mapSearchColumnToField($searchColumn);
         $this->logger->debug("Mapped search column '{$searchColumn}' to REST field '{$searchField}'");
 
+        $candidates = Option82Helper::isOption82Field($searchField)
+            ? Option82Helper::queryVariants($searchValue)
+            : [$searchValue];
+
         try {
-            // Build REST API URL
-            $protocol = $this->useSSL ? 'https' : 'http';
-            $url = "{$protocol}://{$this->host}:{$this->port}/rest/ip/dhcp-server/lease";
-            
-            // Add query filters
-            $queryParams = [];
-            if (!empty($dhcpServerName)) {
-                $queryParams['server'] = $dhcpServerName;
-            }
-            // Only return bound leases
-            $queryParams['status'] = 'bound';
-            // Add search filter - search for the value in the mapped field
-            $queryParams[$searchField] = $searchValue;
-            
-            if (!empty($queryParams)) {
-                $url .= '?' . http_build_query($queryParams);
+            foreach ($candidates as $candidate) {
+                $ip = $this->queryBoundLeaseByField($searchField, $candidate, $dhcpServerName);
+                if ($ip !== null) {
+                    if ($candidate !== $searchValue) {
+                        $this->logger->debug("Matched Option 82 using encoded variant '{$candidate}' for search '{$searchValue}'");
+                    }
+                    return $ip;
+                }
             }
 
-            $this->logger->debug("Querying REST API: {$url}");
-            $this->logger->debug("Query parameters: " . json_encode($queryParams));
-
-            // Make REST API call
-            $leases = $this->makeRequest('GET', $url);
-            
-            if (!is_array($leases)) {
-                $this->logger->warning("Unexpected response format from Mikrotik REST API");
-                return null;
+            // RouterOS 7.23+ may store Option 82 as hex in a format REST did not filter on.
+            if (Option82Helper::isOption82Field($searchField)) {
+                $ip = $this->findBoundLeaseByDecodedOption82($searchField, $searchValue, $dhcpServerName);
+                if ($ip !== null) {
+                    return $ip;
+                }
             }
 
-            $this->logger->debug("REST API response: " . json_encode($leases));
-
-            if (empty($leases)) {
-                $this->logger->warning("No DHCP lease found for {$searchColumn}={$searchValue} (searched for field: {$searchField})");
-                return null;
-            }
-
-            // Return the active-address (IP) from the first matching lease
-            if (isset($leases[0]['active-address'])) {
-                $ip = $leases[0]['active-address'];
-                $this->logger->info("Found DHCP lease for {$searchColumn}={$searchValue}: IP={$ip}");
-                $this->logger->debug("Full lease entry: " . json_encode($leases[0]));
-                return $ip;
-            }
-
-            $this->logger->warning("Lease found but no active-address field in response. Available fields: " . implode(', ', array_keys($leases[0] ?? [])));
-            $this->logger->debug("First lease entry: " . json_encode($leases[0] ?? []));
+            $this->logger->warning("No DHCP lease found for {$searchColumn}={$searchValue} (searched for field: {$searchField})");
             return null;
-
         } catch (\Exception $e) {
             $this->logger->error("DHCP query exception: {$e->getMessage()}");
             $this->logger->error("Stack trace:\n{$e->getTraceAsString()}");
             return null;
         }
+    }
+
+    /**
+     * Query bound DHCP leases for an exact field value via REST.
+     */
+    private function queryBoundLeaseByField(string $searchField, string $searchValue, string $dhcpServerName): ?string
+    {
+        $protocol = $this->useSSL ? 'https' : 'http';
+        $url = "{$protocol}://{$this->host}:{$this->port}/rest/ip/dhcp-server/lease";
+
+        $queryParams = [
+            'status' => 'bound',
+            $searchField => $searchValue,
+        ];
+        if (!empty($dhcpServerName)) {
+            $queryParams['server'] = $dhcpServerName;
+        }
+
+        $url .= '?' . http_build_query($queryParams);
+
+        $this->logger->debug("Querying REST API: {$url}");
+        $this->logger->debug("Query parameters: " . json_encode($queryParams));
+
+        $leases = $this->makeRequest('GET', $url);
+
+        if (!is_array($leases)) {
+            $this->logger->warning("Unexpected response format from Mikrotik REST API");
+            return null;
+        }
+
+        $this->logger->debug("REST API response: " . json_encode($leases));
+
+        if (empty($leases)) {
+            return null;
+        }
+
+        if (isset($leases[0]['active-address'])) {
+            $ip = $leases[0]['active-address'];
+            $this->logger->info("Found DHCP lease for {$searchField}={$searchValue}: IP={$ip}");
+            $this->logger->debug("Full lease entry: " . json_encode($leases[0]));
+            return $ip;
+        }
+
+        $this->logger->warning("Lease found but no active-address field in response. Available fields: " . implode(', ', array_keys($leases[0] ?? [])));
+        $this->logger->debug("First lease entry: " . json_encode($leases[0] ?? []));
+        return null;
+    }
+
+    /**
+     * Scan bound leases and match Option 82 after decoding hex (ROS 7.23+) or ASCII (older ROS).
+     */
+    private function findBoundLeaseByDecodedOption82(string $searchField, string $searchValue, string $dhcpServerName): ?string
+    {
+        $this->logger->debug("Scanning DHCP leases for Option 82 match after hex/ASCII decode: {$searchField}={$searchValue}");
+
+        foreach ($this->getAllDhcpLeases($dhcpServerName) as $lease) {
+            if (($lease['status'] ?? '') !== 'bound') {
+                continue;
+            }
+
+            $leaseValue = $lease[$searchField] ?? '';
+            if ($leaseValue === '' || !Option82Helper::matches($leaseValue, $searchValue)) {
+                continue;
+            }
+
+            $ip = $lease['active-address'] ?? null;
+            if ($ip === null) {
+                continue;
+            }
+
+            $decoded = Option82Helper::ascii($leaseValue);
+            $this->logger->info("Found DHCP lease for {$searchField}={$searchValue}: IP={$ip} (lease value '{$leaseValue}' decoded as '{$decoded}')");
+            $this->logger->debug("Full lease entry: " . json_encode($lease));
+            return $ip;
+        }
+
+        return null;
     }
 
     /**

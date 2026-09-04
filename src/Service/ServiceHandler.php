@@ -36,10 +36,11 @@ class ServiceHandler
      * @param int $clientId
      * @param int $serviceId
      * @param string|null $searchValue The value of the configured search attribute from webhook payload
-     * @param int|null $status The service status (1=Active, 2=Suspended, 3=Ended)
+     * @param int|null $status The service status (1=Active, 2=Ended, 3=Suspended)
+     * @param array $serviceData Speed fields from the webhook entity (overrides, plan speeds, expiry)
      * @return bool
      */
-    public function processServiceWebhook(string $eventType, int $clientId, int $serviceId, ?string $searchValue = null, ?int $status = null): bool
+    public function processServiceWebhook(string $eventType, int $clientId, int $serviceId, ?string $searchValue = null, ?int $status = null, array $serviceData = []): bool
     {
         $this->logger->info("Processing webhook {$eventType} for service {$serviceId}");
 
@@ -113,38 +114,26 @@ class ServiceHandler
             $success = $hostApi->addToAddressList($targetList, $ipAddress, $comment);
         }
 
-        // Handle Speed_Package lists for active services
+        // Handle Speed_Package lists for active services (plan speed or traffic-shaping override)
         if ($success && $status === self::STATUS_ACTIVE) {
             $this->logger->debug("Service {$serviceId} is active, handling Speed_Package lists");
 
-            // Fetch full service data to get speed information
-            $fullService = $this->ucrmApi->getService($serviceId);
-            if ($fullService) {
-                $downSpeed = $fullService['downloadSpeedOverride'] ?? $fullService['downloadSpeed'] ?? null;
-                $upSpeed = $fullService['uploadSpeedOverride'] ?? $fullService['uploadSpeed'] ?? null;
-
-                if ($downSpeed !== null && $upSpeed !== null) {
-                    $speedPackageList = $this->buildSpeedPackageListName($downSpeed, $upSpeed);
-
-                    // Remove from any other Speed_Package lists on this host only
-                    $this->removeFromSpeedPackageListsOnHost($hostApi, $ipAddress, $speedPackageList);
-
-                    // Add to the correct Speed_Package list on this host only
-                    $speedComment = sprintf(
-                        'Speed Package %dMbps down / %dMbps up - Client ID: %d, Service ID: %d',
-                        $downSpeed,
-                        $upSpeed,
-                        $clientId,
-                        $serviceId
-                    );
-                    $this->logger->debug("Adding {$ipAddress} to '{$speedPackageList}' on {$foundHost} for service {$serviceId}");
-                    $hostApi->addToAddressList($speedPackageList, $ipAddress, $speedComment);
-                } else {
-                    $this->logger->warning("Service {$serviceId} missing speed data: down={$downSpeed}, up={$upSpeed}");
+            $speedSource = $serviceData;
+            if ($this->getEffectiveDownloadSpeed($speedSource) === null || $this->getEffectiveUploadSpeed($speedSource) === null) {
+                $fullService = $this->ucrmApi->getService($serviceId);
+                if ($fullService) {
+                    $speedSource = $fullService;
                 }
-            } else {
-                $this->logger->warning("Could not fetch full service data for service {$serviceId}");
             }
+
+            $this->applySpeedPackageForActiveService(
+                $hostApi,
+                $foundHost,
+                $ipAddress,
+                $clientId,
+                $serviceId,
+                $speedSource
+            );
         }
 
         // Record service state
@@ -280,6 +269,8 @@ class ServiceHandler
                 'uploadSpeed' => $service['uploadSpeed'] ?? null,
                 'downloadSpeedOverride' => $service['downloadSpeedOverride'] ?? null,
                 'uploadSpeedOverride' => $service['uploadSpeedOverride'] ?? null,
+                'trafficShapingOverrideEnabled' => $service['trafficShapingOverrideEnabled'] ?? null,
+                'trafficShapingOverrideEnd' => $service['trafficShapingOverrideEnd'] ?? null,
             ];
 
             $matchCount++;
@@ -363,9 +354,18 @@ class ServiceHandler
                 continue;
             }
 
-            // Check if this searchValue matches any service
-            if (isset($servicesBySearchValue[$leaseSearchValue])) {
-                $service = $servicesBySearchValue[$leaseSearchValue];
+            $matchKey = $leaseSearchValue;
+            if (Option82Helper::isOption82Field($searchColumn)) {
+                $decoded = Option82Helper::decode($leaseSearchValue);
+                if ($decoded['encoding'] === 'hex' && $decoded['ascii'] !== null) {
+                    $this->logger->debug("Decoded Option 82 hex '{$leaseSearchValue}' to '{$decoded['ascii']}' for {$ipAddress}");
+                    $matchKey = $decoded['ascii'];
+                }
+            }
+
+            // Check if this searchValue matches any service (ASCII or decoded hex)
+            $service = $servicesBySearchValue[$matchKey] ?? $servicesBySearchValue[$leaseSearchValue] ?? null;
+            if ($service !== null) {
                 $targetList = $this->getTargetListForStatus($service['status']);
 
                 if ($targetList) {
@@ -373,7 +373,7 @@ class ServiceHandler
                         'Client ID: %d, Service ID: %d, Search Value: %s',
                         $service['clientId'],
                         $service['serviceId'],
-                        $leaseSearchValue
+                        $matchKey
                     );
                     $comment = $this->buildLeaseComment($comment, $lease);
                     $this->logger->debug("Adding {$ipAddress} to '{$targetList}' for service {$service['serviceId']}");
@@ -388,10 +388,12 @@ class ServiceHandler
 
                         if ($downSpeed !== null && $upSpeed !== null) {
                             $speedPackageList = $this->buildSpeedPackageListName($downSpeed, $upSpeed);
+                            $overrideActive = $this->isTrafficShapingOverrideActive($service);
                             $speedComment = sprintf(
-                                'Speed Package %dMbps down / %dMbps up - Client ID: %d, Service ID: %d',
+                                'Speed Package %dMbps down / %dMbps up%s - Client ID: %d, Service ID: %d',
                                 $downSpeed,
                                 $upSpeed,
+                                $overrideActive ? ' (override)' : '',
                                 $service['clientId'],
                                 $service['serviceId']
                             );
@@ -478,25 +480,136 @@ class ServiceHandler
     }
 
     /**
-     * Get effective download speed (override if present, else default)
+     * Move an active service IP onto the Speed_Package list for its effective speed.
+     * Uses traffic-shaping override when enabled and not expired; otherwise plan speed.
+     * Runs update_pcq on the host when the list actually changes so PCQ queues exist immediately.
+     */
+    private function applySpeedPackageForActiveService(
+        MikrotikApiService $hostApi,
+        string $foundHost,
+        string $ipAddress,
+        int $clientId,
+        int $serviceId,
+        array $service
+    ): void {
+        $downSpeed = $this->getEffectiveDownloadSpeed($service);
+        $upSpeed = $this->getEffectiveUploadSpeed($service);
+
+        if ($downSpeed === null || $upSpeed === null) {
+            $this->logger->warning("Service {$serviceId} missing speed data: down={$downSpeed}, up={$upSpeed}");
+            return;
+        }
+
+        $speedPackageList = $this->buildSpeedPackageListName($downSpeed, $upSpeed);
+        $overrideActive = $this->isTrafficShapingOverrideActive($service);
+        if ($overrideActive) {
+            $end = $service['trafficShapingOverrideEnd'] ?? 'none';
+            $this->logger->info("Service {$serviceId} using speed override {$downSpeed}/{$upSpeed} (ends {$end})");
+        }
+
+        $this->removeFromSpeedPackageListsOnHost($hostApi, $ipAddress, $speedPackageList);
+
+        $speedComment = sprintf(
+            'Speed Package %dMbps down / %dMbps up%s - Client ID: %d, Service ID: %d',
+            $downSpeed,
+            $upSpeed,
+            $overrideActive ? ' (override)' : '',
+            $clientId,
+            $serviceId
+        );
+
+        $currentLists = $hostApi->getAddressListsForIp($ipAddress);
+        if (in_array($speedPackageList, $currentLists, true)) {
+            $this->logger->debug("IP {$ipAddress} already in '{$speedPackageList}' on {$foundHost}, skipping add");
+            return;
+        }
+
+        $this->logger->debug("Adding {$ipAddress} to '{$speedPackageList}' on {$foundHost} for service {$serviceId}");
+        if (!$hostApi->addToAddressList($speedPackageList, $ipAddress, $speedComment)) {
+            $this->logger->warning("Failed to add {$ipAddress} to '{$speedPackageList}' on {$foundHost}");
+            return;
+        }
+
+        $this->logger->info("Running update_pcq on {$foundHost} after speed list change to {$speedPackageList}");
+        if (!$hostApi->executeScript('/system/script/run update_pcq')) {
+            $this->logger->warning("update_pcq failed on {$foundHost}; queues will be rebuilt on the next nightly sync");
+        }
+    }
+
+    /**
+     * True when UCRM traffic-shaping override should be applied right now.
+     */
+    private function isTrafficShapingOverrideActive(array $service): bool
+    {
+        if (array_key_exists('trafficShapingOverrideEnabled', $service)
+            && $service['trafficShapingOverrideEnabled'] !== null
+        ) {
+            $enabled = (bool) $service['trafficShapingOverrideEnabled'];
+        } else {
+            $enabled = $this->toNullableInt($service['downloadSpeedOverride'] ?? null) !== null
+                || $this->toNullableInt($service['uploadSpeedOverride'] ?? null) !== null;
+        }
+
+        if (!$enabled) {
+            return false;
+        }
+
+        $end = $service['trafficShapingOverrideEnd'] ?? null;
+        if ($end === null || $end === '') {
+            return true;
+        }
+
+        try {
+            return new \DateTime($end) > new \DateTime();
+        } catch (\Exception $e) {
+            $this->logger->warning("Could not parse trafficShapingOverrideEnd '{$end}': {$e->getMessage()}");
+            return true;
+        }
+    }
+
+    /**
+     * Get effective download speed (active override if present, else plan speed)
      *
      * @param array $service Service data array
      * @return int|null
      */
     private function getEffectiveDownloadSpeed(array $service): ?int
     {
-        return $service['downloadSpeedOverride'] ?? $service['downloadSpeed'] ?? null;
+        if ($this->isTrafficShapingOverrideActive($service)) {
+            $override = $this->toNullableInt($service['downloadSpeedOverride'] ?? null);
+            if ($override !== null) {
+                return $override;
+            }
+        }
+
+        return $this->toNullableInt($service['downloadSpeed'] ?? null);
     }
 
     /**
-     * Get effective upload speed (override if present, else default)
+     * Get effective upload speed (active override if present, else plan speed)
      *
      * @param array $service Service data array
      * @return int|null
      */
     private function getEffectiveUploadSpeed(array $service): ?int
     {
-        return $service['uploadSpeedOverride'] ?? $service['uploadSpeed'] ?? null;
+        if ($this->isTrafficShapingOverrideActive($service)) {
+            $override = $this->toNullableInt($service['uploadSpeedOverride'] ?? null);
+            if ($override !== null) {
+                return $override;
+            }
+        }
+
+        return $this->toNullableInt($service['uploadSpeed'] ?? null);
+    }
+
+    private function toNullableInt($value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return (int) $value;
     }
 
     /**

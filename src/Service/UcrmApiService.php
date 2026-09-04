@@ -25,7 +25,14 @@ class UcrmApiService
     {
         try {
             $result = $this->ucrmApi->get('clients/services/' . $serviceId);
-            return $result[0] ?? null;
+            if (!is_array($result) || $result === []) {
+                return null;
+            }
+            // Single-service GET returns an object; list endpoints return [0 => service]
+            if (isset($result['id'])) {
+                return $result;
+            }
+            return $result[0] ?? $result;
         } catch (\Exception $e) {
             $this->logger->error("Failed to get service {$serviceId}: {$e->getMessage()}");
             return null;

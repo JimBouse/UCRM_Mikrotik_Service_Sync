@@ -184,11 +184,19 @@ class Plugin
             }
         }
 
-        // Extract the service status
+        // Extract the service status and speed fields from the webhook entity
         $status = $entity['status'] ?? null;
+        $serviceData = [
+            'downloadSpeed' => $entity['downloadSpeed'] ?? null,
+            'uploadSpeed' => $entity['uploadSpeed'] ?? null,
+            'downloadSpeedOverride' => $entity['downloadSpeedOverride'] ?? null,
+            'uploadSpeedOverride' => $entity['uploadSpeedOverride'] ?? null,
+            'trafficShapingOverrideEnabled' => $entity['trafficShapingOverrideEnabled'] ?? null,
+            'trafficShapingOverrideEnd' => $entity['trafficShapingOverrideEnd'] ?? null,
+        ];
 
         // Process the service event
-        $this->serviceHandler->processServiceWebhook($eventName, $clientId, $entityId, $searchValue, $status);
+        $this->serviceHandler->processServiceWebhook($eventName, $clientId, $entityId, $searchValue, $status, $serviceData);
     }
 
     /**
