@@ -1,0 +1,79 @@
+# ============================================
+# Script: update_dhcp_leases
+# Purpose: Remove DHCP leases last-seen older
+#          than dhcpLeaseStaleDays, then convert
+#          remaining dynamic leases to static
+# Globals (set by plugin before run):
+#   dhcpLeaseStaleDays   - number, 0 = skip prune
+#   dhcpLeaseServerName  - DHCP server, "" = all
+# ============================================
+
+:global dhcpLeaseStaleDays
+:global dhcpLeaseServerName
+
+:local logPrefix "update_dhcp_leases: "
+:local staleDays 7
+:local serverName ""
+
+:if ([:typeof $dhcpLeaseStaleDays] = "num") do={
+    :set staleDays $dhcpLeaseStaleDays
+} else={
+    :if (([:typeof $dhcpLeaseStaleDays] = "str") && ([:len $dhcpLeaseStaleDays] > 0)) do={
+        :set staleDays [:tonum $dhcpLeaseStaleDays]
+    }
+}
+
+:if ([:typeof $dhcpLeaseServerName] = "str") do={
+    :set serverName $dhcpLeaseServerName
+}
+
+:local serverLabel "*"
+:if ([:len $serverName] > 0) do={
+    :set serverLabel $serverName
+}
+
+:log info ($logPrefix . "Starting... server=" . $serverLabel . " staleDays=" . $staleDays)
+
+:local leaseIds
+:if ([:len $serverName] > 0) do={
+    :set leaseIds [/ip dhcp-server lease find where server=$serverName]
+} else={
+    :set leaseIds [/ip dhcp-server lease find]
+}
+
+:local removed 0
+:local converted 0
+
+:if ($staleDays > 0) do={
+    :local maxAge [:totime ([:tostr $staleDays] . "d")]
+    :foreach i in=$leaseIds do={
+        :onerror err in={
+            :local ls [/ip dhcp-server lease get $i last-seen]
+            :if ([:typeof $ls] = "time") do={
+                :if ($ls > $maxAge) do={
+                    /ip dhcp-server lease remove $i
+                    :set removed ($removed + 1)
+                }
+            }
+        } do={
+            :log warning ($logPrefix . "prune failed: " . $err)
+        }
+    }
+}
+
+:if ([:len $serverName] > 0) do={
+    :set leaseIds [/ip dhcp-server lease find where server=$serverName dynamic=yes]
+} else={
+    :set leaseIds [/ip dhcp-server lease find where dynamic=yes]
+}
+
+:foreach i in=$leaseIds do={
+    :onerror err in={
+        /ip dhcp-server lease make-static $i
+        :set converted ($converted + 1)
+    } do={
+        :log warning ($logPrefix . "make-static failed: " . $err)
+    }
+}
+
+:log info ($logPrefix . "Finished. converted=" . $converted . " removed=" . $removed)

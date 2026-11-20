@@ -45,18 +45,23 @@ class MikrotikApiService
         $searchField = $this->mapSearchColumnToField($searchColumn);
         $this->logger->debug("Mapped search column '{$searchColumn}' to REST field '{$searchField}'");
 
+        $searchFields = Option82Helper::isOption82Field($searchField)
+            ? Option82Helper::leaseFieldCandidates($searchField)
+            : [$searchField];
         $candidates = Option82Helper::isOption82Field($searchField)
             ? Option82Helper::queryVariants($searchValue)
             : [$searchValue];
 
         try {
-            foreach ($candidates as $candidate) {
-                $ip = $this->queryBoundLeaseByField($searchField, $candidate, $dhcpServerName);
-                if ($ip !== null) {
-                    if ($candidate !== $searchValue) {
-                        $this->logger->debug("Matched Option 82 using encoded variant '{$candidate}' for search '{$searchValue}'");
+            foreach ($searchFields as $field) {
+                foreach ($candidates as $candidate) {
+                    $ip = $this->queryBoundLeaseByField($field, $candidate, $dhcpServerName);
+                    if ($ip !== null) {
+                        if ($field !== $searchField || $candidate !== $searchValue) {
+                            $this->logger->debug("Matched Option 82 using field '{$field}' value '{$candidate}' for search '{$searchValue}'");
+                        }
+                        return $ip;
                     }
-                    return $ip;
                 }
             }
 
@@ -135,7 +140,7 @@ class MikrotikApiService
                 continue;
             }
 
-            $leaseValue = $lease[$searchField] ?? '';
+            $leaseValue = Option82Helper::leaseValue($lease, $searchField) ?? '';
             if ($leaseValue === '' || !Option82Helper::matches($leaseValue, $searchValue)) {
                 continue;
             }

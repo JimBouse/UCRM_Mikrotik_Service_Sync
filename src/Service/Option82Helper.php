@@ -23,6 +23,49 @@ class Option82Helper
     }
 
     /**
+     * REST/lease field names to try for a configured search column.
+     * Newer RouterOS uses active-agent-*; older ROS only has agent-*.
+     *
+     * @return string[]
+     */
+    public static function leaseFieldCandidates(string $searchColumn): array
+    {
+        $normalized = strtolower($searchColumn);
+
+        if (in_array($normalized, ['active-agent-circuit-id', 'agent-circuit-id', 'circuitid'], true)) {
+            return ['active-agent-circuit-id', 'agent-circuit-id'];
+        }
+
+        if (in_array($normalized, ['active-agent-remote-id', 'agent-remote-id', 'remoteid'], true)) {
+            return ['active-agent-remote-id', 'agent-remote-id'];
+        }
+
+        return [$searchColumn];
+    }
+
+    /**
+     * Read Option 82 (or other search) value from a DHCP lease.
+     * Prefers active-agent-* when present and non-empty, else agent-*.
+     */
+    public static function leaseValue(array $lease, string $searchColumn): ?string
+    {
+        foreach (self::leaseFieldCandidates($searchColumn) as $field) {
+            if (!array_key_exists($field, $lease)) {
+                continue;
+            }
+
+            $value = $lease[$field];
+            if ($value === null || $value === '') {
+                continue;
+            }
+
+            return (string) $value;
+        }
+
+        return null;
+    }
+
+    /**
      * @return array{raw: string, encoding: string, ascii: ?string, printable: bool, bytes: string}
      */
     public static function decode(string $value): array
@@ -90,8 +133,20 @@ class Option82Helper
     }
 
     /**
+     * Strip separators from a MAC/Option 82 string so UCRM `78:45:58:9A:06:0C`
+     * can match a MikroTik remote ID of `7845589a060c`.
+     */
+    public static function normalizeForCompare(string $value): string
+    {
+        $stripped = preg_replace('/[:.;,\-\s]/', '', $value);
+
+        return strtolower($stripped ?? '');
+    }
+
+    /**
      * True when a DHCP lease Option 82 field matches a UCRM search value,
      * whether MikroTik returned ASCII (older ROS) or hex (7.23+).
+     * Also matches after stripping separators such as : . ; -
      */
     public static function matches(string $leaseValue, string $searchValue): bool
     {
@@ -102,7 +157,20 @@ class Option82Helper
         $leaseAscii = self::ascii($leaseValue);
         $searchAscii = self::ascii($searchValue);
 
-        return $leaseAscii === $searchValue || $leaseAscii === $searchAscii;
+        if ($leaseAscii === $searchValue || $leaseAscii === $searchAscii) {
+            return true;
+        }
+
+        $leaseNorm = self::normalizeForCompare($leaseValue);
+        $searchNorm = self::normalizeForCompare($searchValue);
+        if ($leaseNorm !== '' && $leaseNorm === $searchNorm) {
+            return true;
+        }
+
+        $leaseAsciiNorm = self::normalizeForCompare($leaseAscii);
+        $searchAsciiNorm = self::normalizeForCompare($searchAscii);
+
+        return $leaseAsciiNorm !== '' && ($leaseAsciiNorm === $searchNorm || $leaseAsciiNorm === $searchAsciiNorm);
     }
 
     /**
@@ -123,6 +191,13 @@ class Option82Helper
             $colon = implode(':', str_split($hex, 2));
             $variants[] = $colon;
             $variants[] = strtoupper($colon);
+        }
+
+        $stripped = preg_replace('/[:.;,\-\s]/', '', $searchValue) ?? $searchValue;
+        if ($stripped !== $searchValue && $stripped !== '') {
+            $variants[] = $stripped;
+            $variants[] = strtolower($stripped);
+            $variants[] = strtoupper($stripped);
         }
 
         return array_values(array_unique($variants));

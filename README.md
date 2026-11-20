@@ -20,6 +20,7 @@ Automatically synchronize UCRM service status with Mikrotik address lists for se
   **Unknown IP Address List**
   - `Service_Unknown`: All remaining and *unknown* DHCP lease entries are added to this list to catch stragglers.
 - **Automatically Create PCQ Queues**: Automatically build speed queues for each speed package in UCRM
+- **Nightly DHCP Reservations**: Converts dynamic DHCP leases to static reservations and removes leases last seen more than a configurable number of days (default 7)
 
 - **Multi-Mikrotik Support**: Multiple headend routers can be managed from one UCRM instance.  Since it is based on the DHCP leases, each address list entry is applied to only the mikrotik router it should be on.
 
@@ -63,7 +64,8 @@ In UCRM Admin > Plugins > Installed Plugins > Mikrotik Service Suspension Sync:
    - API Port: Default is 443 for HTTPS. For unencrypted connections use 8728, for SSL use 8729 - applies to all instances
 
 2. **DHCP Server Settings**
-   - DHCP Server Name: Name of your DHCP server in Mikrotik. Leave blank to search all DHCP servers and include all matching leases in the address list regardless of which server they're on.
+   - DHCP Server Name: Name of your DHCP server in Mikrotik. Leave blank to search all DHCP servers and include all matching leases in the address list regardless of which server they're on. Nightly lease conversion and pruning use this same filter: if set, only that DHCP server is touched.
+   - DHCP Lease Max Last-Seen Days: During nightly sync, leases last seen longer than this many days are removed, then remaining dynamic leases are made static. Leave blank for 7 days. Set `0` to convert to static without pruning.
 
 3. **Address List Names**
    - Service Active List: Name for active service addresses (default: "Service_Active")
@@ -92,7 +94,9 @@ In UCRM Admin > Plugins > Installed Plugins > Mikrotik Service Suspension Sync:
 1. Enable API on your Mikrotik device
 2. Create an API user with the following permissions:
    - Read/Write on `/ip/firewall/address-list`
-   - Read on `/ip/dhcp-server/lease`
+   - Read/Write on `/ip/dhcp-server/lease` (nightly convert-to-static and prune)
+   - Read/Write on `/system/script` and execute `/system/script/run`
+   - `/tool/fetch` and `/import` for helper script updates
 3. Configure DHCP server appropriately:
    - **For Option 82 searching**: Ensure DHCP servers use option 82 to store circuit IDs or remote IDs
    - **For MAC searching**: MAC addresses are automatically stored by Mikrotik
@@ -132,6 +136,7 @@ The plugin matches UCRM services to Mikrotik devices by searching for a value fr
 - **Search value**: Device serial number or circuit ID from the service custom attribute
 - **Example**: `ABK23H4012`
 - **RouterOS encoding**: Older RouterOS returns Option 82 as ASCII. RouterOS 7.23+ REST often returns it as hex (`0x...`, plain hex, or colon-separated bytes). The plugin decodes both so UCRM ASCII values still match.
+- **Field names**: Newer RouterOS exposes `active-agent-circuit-id`. Older RouterOS only has `agent-circuit-id`. The plugin uses the `active-*` key first, then falls back to the unprefixed key.
 
 ### Option 82 - Remote ID
 - **Use when**: Mikrotik DHCP server stores device remote IDs in option 82
@@ -139,6 +144,8 @@ The plugin matches UCRM services to Mikrotik devices by searching for a value fr
 - **Search value**: Device remote ID from the service custom attribute
 - **Example**: `REMOTE-12345`
 - **RouterOS encoding**: Same ASCII and hex handling as Circuit ID.
+- **Field names**: Same `active-agent-remote-id` then `agent-remote-id` fallback as Circuit ID.
+- **Separators**: If UCRM stores a MAC with colons (`78:45:58:9A:06:0C`) and MikroTik remote ID has none (`7845589a060c`), the plugin strips `: . ; -` and compares case-insensitively.
 
 ### Active MAC
 - **Use when**: You want to identify devices by their MAC address
@@ -276,7 +283,31 @@ PCQ script management happens automatically during daily sync. No additional con
 - Manually test script execution: `/system/script/run update_pcq`
 - Verify the API user has execute permissions on `/system/script`
 
+## DHCP Lease Maintenance
 
+During nightly sync (not webhooks), the plugin installs and runs `update_dhcp_leases` on each Mikrotik, **before** address lists are rebuilt:
+
+1. **Script Fetch**: Fetches `update_dhcp_leases_script.txt` from the plugin public directory
+2. **Script Import**: Imports `/system script` named `update_dhcp_leases`
+3. **Globals**: Sets `dhcpLeaseStaleDays` (blank config = 7, `0` = do not prune) and `dhcpLeaseServerName` (the DHCP Server Name setting, or empty for all servers)
+4. **Prune**: Removes in-scope leases whose `last-seen` is older than that many days
+5. **Make static**: Converts remaining in-scope `dynamic=yes` leases to static reservations
+6. **Address-list sync**: Nightly then reads the remaining leases and rebuilds `Service_*` lists
+
+If **DHCP Server Name** is set, only leases on that server are converted or removed. Other DHCP servers on the same router are left alone.
+
+### DHCP Lease Script Files
+
+- `public/update_dhcp_leases_script.txt` - Installer imported on each Mikrotik
+- `public/update_dhcp_leases.txt` - Readable RouterOS source
+
+### Troubleshooting DHCP Lease Scripts
+
+- Verify the plugin public URL is reachable and contains `update_dhcp_leases_script.txt`
+- Check Mikrotik log for `DHCP leases FETCH URL: ...`, `IMPORT file: update_dhcp_leases.rsc`, and `SCRIPT READY: update_dhcp_leases`
+- Check Mikrotik log for `update_dhcp_leases: Starting... server=... staleDays=...`
+- Manually test: `/system/script/run update_dhcp_leases`
+- Confirm the API user can write `/ip/dhcp-server/lease`
 
 Plugin logs are available in UCRM Admin > Tools > Logs > Plugin Logs
 
@@ -358,6 +389,22 @@ For issues, enable debug logging and check:
 3. Mikrotik logs for API errors
 
 ## Version History
+
+### v1.2.77 (First-run DHCP script)
+- After import, wait until `/system script update_dhcp_leases` exists before running it (first nightly used to skip the run)
+
+### v1.2.76 (DHCP script import)
+- Logs the full helper-script fetch URL on the Mikrotik (`log info`)
+- Waits for the fetched `.rsc` then runs `/import update_dhcp_leases.rsc` (same syntax as the terminal)
+
+### v1.2.75 (DHCP script import)
+- Logs the full helper-script fetch URL on the Mikrotik (`log info`)
+- Imports the fetched `.rsc` by its actual file name (including `flash/`) so `/system script add` succeeds
+
+### v1.2.74 (Nightly DHCP lease maintenance)
+- Nightly `update_dhcp_leases` helper converts dynamic leases to static reservations
+- Removes leases last seen longer than **DHCP Lease Max Last-Seen Days** (blank = 7, `0` = convert only)
+- When **DHCP Server Name** is set, only that server's leases are converted or pruned
 
 ### v1.2.0 (SSL/TLS & Flexible Device Search)
 - Added SSL/TLS support for secure Mikrotik connections (port 8729)

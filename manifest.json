@@ -5,7 +5,7 @@
     "displayName": "Mikrotik Service Sync",
     "description": "Automatically synchronize UCRM service status with Mikrotik address lists for service suspension and activation using Mikrotik REST API. Processes webhooks for service events and runs daily sync to ensure all services are in the correct state.",
     "url": "https://github.com/JimBouse/UCRM_Mikrotik_Service_Sync",
-    "version": "1.2.71",
+    "version": "1.2.77",
     "author": "Jim Bouse - jimbouse.com",
     "unmsVersionCompliancy": {
       "min": "2.1.0",
@@ -59,6 +59,13 @@
       "key": "dhcpServerName",
       "label": "DHCP Server Name",
       "description": "Name of the DHCP server in Mikrotik (e.g., 'default'). Leave blank to search all DHCP leases regardless of server.",
+      "type": "text",
+      "required": 0
+    },
+    {
+      "key": "dhcpLeaseStaleDays",
+      "label": "DHCP Lease Max Last-Seen Days",
+      "description": "During nightly sync, remove DHCP leases last seen more than this many days ago, then convert remaining dynamic leases to static. Leave blank to use 7. Set 0 to convert to static but not prune. Only the DHCP server named above is touched when that field is set.",
       "type": "text",
       "required": 0
     },

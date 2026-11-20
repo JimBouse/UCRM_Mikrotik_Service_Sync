@@ -260,7 +260,7 @@ class ServiceHandler
             }
 
             // Index by searchValue
-            $servicesBySearchValue[$searchValue] = [
+            $serviceRecord = [
                 'serviceId' => $serviceId,
                 'clientId' => $clientId,
                 'status' => $status,
@@ -272,6 +272,13 @@ class ServiceHandler
                 'trafficShapingOverrideEnabled' => $service['trafficShapingOverrideEnabled'] ?? null,
                 'trafficShapingOverrideEnd' => $service['trafficShapingOverrideEnd'] ?? null,
             ];
+            $servicesBySearchValue[$searchValue] = $serviceRecord;
+
+            // Also index MAC-style values without separators (78:45:.. vs 7845..)
+            $normalized = Option82Helper::normalizeForCompare($searchValue);
+            if ($normalized !== '' && !isset($servicesBySearchValue[$normalized])) {
+                $servicesBySearchValue[$normalized] = $serviceRecord;
+            }
 
             $matchCount++;
         }
@@ -342,8 +349,8 @@ class ServiceHandler
                 continue;
             }
 
-            // Extract searchColumn value from this lease
-            $leaseSearchValue = $lease[$searchColumn] ?? null;
+            // Extract searchColumn value from this lease (active-agent-* then agent-* for Option 82)
+            $leaseSearchValue = Option82Helper::leaseValue($lease, $searchColumn);
             if (!$leaseSearchValue) {
                 $this->logger->debug("Lease {$ipAddress} missing search column '{$searchColumn}', adding to Service_Unknown");
                 $comment = $this->buildLeaseComment("Empty {$searchColumn}", $lease);
@@ -363,8 +370,12 @@ class ServiceHandler
                 }
             }
 
-            // Check if this searchValue matches any service (ASCII or decoded hex)
-            $service = $servicesBySearchValue[$matchKey] ?? $servicesBySearchValue[$leaseSearchValue] ?? null;
+            // Check if this searchValue matches any service (ASCII, decoded hex, or stripped separators)
+            $service = $servicesBySearchValue[$matchKey]
+                ?? $servicesBySearchValue[$leaseSearchValue]
+                ?? $servicesBySearchValue[Option82Helper::normalizeForCompare($matchKey)]
+                ?? $servicesBySearchValue[Option82Helper::normalizeForCompare($leaseSearchValue)]
+                ?? null;
             if ($service !== null) {
                 $targetList = $this->getTargetListForStatus($service['status']);
 

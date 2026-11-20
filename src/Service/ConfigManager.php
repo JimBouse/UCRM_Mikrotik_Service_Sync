@@ -100,6 +100,27 @@ class ConfigManager
         return $this->getConfigValue('dhcpServerName', '');
     }
 
+    /**
+     * Days after last-seen before a DHCP lease reservation is removed.
+     * Blank / missing / invalid defaults to 7. Zero disables pruning.
+     */
+    public function getDhcpLeaseStaleDays(): int
+    {
+        $raw = $this->getConfigValue('dhcpLeaseStaleDays', null);
+        if ($raw === null || $raw === '') {
+            return 7;
+        }
+        if (!is_numeric($raw)) {
+            return 7;
+        }
+        $days = (int)$raw;
+        if ($days < 0) {
+            return 7;
+        }
+
+        return $days;
+    }
+
     public function getServiceActiveListName(): string
     {
         return $this->getConfigValue('serviceActiveListName', 'Service_Active');

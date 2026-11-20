@@ -37,8 +37,12 @@ class Plugin
                 throw new \Exception("Invalid plugin configuration");
             }
 
-            // Update PCQ script on Mikrotik (one of the first tasks)
+            // Update helper scripts on Mikrotik (one of the first tasks)
             $this->updatePcqScript();
+            $this->updateDhcpLeasesScript();
+
+            // Convert/prune DHCP leases before rebuilding address lists
+            $this->runUpdateDhcpLeasesScript();
 
             // Execute daily sync
             $this->syncAllServices();
@@ -200,23 +204,21 @@ class Plugin
     }
 
     /**
-     * Update PCQ script on all Mikrotik hosts
+     * Fetch and import a helper script from the plugin public directory onto all Mikrotik hosts
      */
-    private function updatePcqScript(): void
+    private function installRemoteScript(string $publicFile, string $dstPath, string $scriptName, string $label): void
     {
         try {
             $mikrotikApiManager = $this->container->get(\Ubnt\Plugins\MikrotikSync\Service\MikrotikApiManager::class);
 
-            // Get the plugin's public URL and append the script file
             $publicUrl = $this->configManager->getPluginPublicUrl();
             if (empty($publicUrl)) {
-                $this->logger->warning("Could not determine plugin public URL, skipping PCQ script update");
+                $this->logger->warning("Could not determine plugin public URL, skipping {$label} script update");
                 return;
             }
 
-            $scriptUrl = $publicUrl . 'update_pcq_script.txt';
-
-            $this->logger->debug("Updating PCQ script on Mikrotik from: {$scriptUrl}");
+            $scriptUrl = $publicUrl . $publicFile;
+            $this->logger->info("Updating {$label} script on Mikrotik from: {$scriptUrl}");
 
             $hosts = $this->configManager->getMikrotikHosts();
             foreach ($hosts as $host) {
@@ -227,30 +229,51 @@ class Plugin
                         continue;
                     }
 
-                    // Step 1: Fetch the script file with error handling
-                    $fetchScript = ':onerror e in={ /tool fetch url="' . $scriptUrl . '" dst-path=update_pcq.rsc } do={ :log error ("PCQ FETCH FAILED: " . $e) }';
-                    $this->logger->debug("Executing fetch step on {$host}");
-                    if (!$apiService->executeScript($fetchScript)) {
-                        $this->logger->warning("PCQ fetch step failed on {$host}");
+                    // Same import syntax that works in the Mikrotik terminal: /import update_dhcp_leases.rsc
+                    // Wait until /system script exists — /import can return before script add finishes.
+                    // $ variables must stay in single-quoted PHP so RouterOS sees them.
+                    $installScript = ':log info ("' . $label . ' FETCH URL: ' . $scriptUrl . '"); '
+                        . ':onerror e in={ /tool fetch url="' . $scriptUrl . '" dst-path="' . $dstPath . '" } do={ :log error ("' . $label . ' FETCH FAILED: " . $e) }; '
+                        . ':local n 0; '
+                        . ':while (($n < 15) && ([:len [/file find name="' . $dstPath . '"]] = 0)) do={ :delay 1s; :set n ($n + 1) }; '
+                        . ':if ([:len [/file find name="' . $dstPath . '"]] = 0) do={ :log error ("' . $label . ' FETCH FILE MISSING: ' . $dstPath . '") } else={ '
+                        . ':log info ("' . $label . ' IMPORT file: ' . $dstPath . '"); '
+                        . '/import ' . $dstPath . '; '
+                        . ':local s 0; '
+                        . ':while (($s < 15) && ([:len [/system script find name=' . $scriptName . ']] = 0)) do={ :delay 1s; :set s ($s + 1) }; '
+                        . ':if ([:len [/system script find name=' . $scriptName . ']] = 0) do={ :log error ("' . $label . ' SCRIPT MISSING after import: ' . $scriptName . '") } else={ :log info ("' . $label . ' SCRIPT READY: ' . $scriptName . '") } '
+                        . '}';
+
+                    $this->logger->info("Fetching and importing {$label} on {$host} from {$scriptUrl}");
+                    if (!$apiService->executeScript($installScript)) {
+                        $this->logger->warning("{$label} fetch/import failed on {$host}");
                         continue;
                     }
 
-                    // Step 2: Import the fetched script with error handling
-                    $importScript = ':onerror e in={ /import update_pcq.rsc } do={ :log error ("PCQ IMPORT FAILED: " . $e) }';
-                    $this->logger->debug("Executing import step on {$host}");
-                    if (!$apiService->executeScript($importScript)) {
-                        $this->logger->warning("PCQ import step failed on {$host}");
-                        continue;
-                    }
-
-                    $this->logger->info("PCQ script update completed successfully on {$host}");
+                    $this->logger->info("{$label} script update completed successfully on {$host}");
                 } catch (\Exception $e) {
-                    $this->logger->warning("Error updating PCQ script on {$host}: {$e->getMessage()}");
+                    $this->logger->warning("Error updating {$label} script on {$host}: {$e->getMessage()}");
                 }
             }
         } catch (\Exception $e) {
-            $this->logger->warning("Error updating PCQ script: {$e->getMessage()}, continuing with sync");
+            $this->logger->warning("Error updating {$label} script: {$e->getMessage()}, continuing with sync");
         }
+    }
+
+    /**
+     * Update PCQ script on all Mikrotik hosts
+     */
+    private function updatePcqScript(): void
+    {
+        $this->installRemoteScript('update_pcq_script.txt', 'update_pcq.rsc', 'update_pcq', 'PCQ');
+    }
+
+    /**
+     * Update DHCP lease helper script on all Mikrotik hosts
+     */
+    private function updateDhcpLeasesScript(): void
+    {
+        $this->installRemoteScript('update_dhcp_leases_script.txt', 'update_dhcp_leases.rsc', 'update_dhcp_leases', 'DHCP leases');
     }
 
     /**
@@ -290,6 +313,48 @@ class Plugin
                 }
             } catch (\Exception $e) {
                 $this->logger->error("Failed to run update_pcq script on {$host}: {$e->getMessage()}");
+            }
+        }
+    }
+
+    /**
+     * Run update_dhcp_leases on all Mikrotik hosts using plugin stale-days and DHCP server settings
+     */
+    private function runUpdateDhcpLeasesScript(): void
+    {
+        $staleDays = $this->configManager->getDhcpLeaseStaleDays();
+        $serverName = $this->configManager->getDhcpServerName();
+        $serverLabel = $serverName !== '' ? $serverName : '*';
+        $escapedServer = str_replace(['\\', '"'], ['\\\\', '\\"'], $serverName);
+
+        $this->logger->info("Running update_dhcp_leases on all Mikrotik hosts (server={$serverLabel}, staleDays={$staleDays})");
+
+        $mikrotikApi = $this->container->get(\Ubnt\Plugins\MikrotikSync\Service\MikrotikApiManager::class);
+        $hosts = $this->configManager->getMikrotikHosts();
+
+        foreach ($hosts as $host) {
+            try {
+                $apiService = $mikrotikApi->getMikrotikApiService($host);
+                if (!$apiService) {
+                    $this->logger->warning("Could not get API service for host {$host}");
+                    continue;
+                }
+
+                $script = ':local n 0; '
+                    . ':while (($n < 15) && ([:len [/system script find name=update_dhcp_leases]] = 0)) do={ :delay 1s; :set n ($n + 1) }; '
+                    . ':if ([:len [/system script find name=update_dhcp_leases]] = 0) do={ :log error "update_dhcp_leases SCRIPT MISSING, skip run" } else={ '
+                    . ':global dhcpLeaseStaleDays ' . $staleDays
+                    . '; :global dhcpLeaseServerName "' . $escapedServer
+                    . '"; /system script run update_dhcp_leases '
+                    . '}';
+                $this->logger->info("Executing script on {$host}: /system script run update_dhcp_leases");
+                if ($apiService->executeScript($script)) {
+                    $this->logger->info("Successfully ran update_dhcp_leases script on {$host}");
+                } else {
+                    $this->logger->error("Failed to run update_dhcp_leases script on {$host}");
+                }
+            } catch (\Exception $e) {
+                $this->logger->error("Failed to run update_dhcp_leases script on {$host}: {$e->getMessage()}");
             }
         }
     }
