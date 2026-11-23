@@ -78,10 +78,8 @@ class Logger
     }
 
     /**
-     * Clean log entries older than 48 hours
-     * Logs success or failure of the cleanup operation
-     *
-     * @return bool True if successful, false otherwise
+     * Drop everything above the first [YYYY-MM-DD ...] line still within 48 hours.
+     * Undated stack-trace lines above that cutoff go with the old entries.
      */
     public function cleanOldLogs(): bool
     {
@@ -103,32 +101,30 @@ class Logger
             }
 
             $originalCount = count($lines);
-            $keptLines = [];
+            $keepFrom = null;
 
-            foreach ($lines as $line) {
-                // Extract timestamp from log line format: [YYYY-MM-DD HH:MM:SS.xxxxxx]
+            foreach ($lines as $index => $line) {
                 if (preg_match('/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.(\d+)\]/', $line, $matches)) {
                     $lineTimestamp = strtotime($matches[1]);
                     if ($lineTimestamp > $fortyEightHoursAgo) {
-                        $keptLines[] = $line;
+                        $keepFrom = $index;
+                        break;
                     }
-                } else {
-                    // Keep lines that don't match the timestamp format (just in case)
-                    $keptLines[] = $line;
                 }
             }
 
-            $removedCount = $originalCount - count($keptLines);
-            
-            // Write back the filtered lines
+            $keptLines = $keepFrom === null ? [] : array_slice($lines, $keepFrom);
+            $keptCount = count($keptLines);
+            $removedCount = $originalCount - $keptCount;
+
             $written = file_put_contents($logFile, implode('', $keptLines));
-            
+
             if ($written === false) {
                 $this->error("Log cleanup: Failed to write cleaned log file");
                 return false;
             }
 
-            $this->info("Log cleanup: Removed {$removedCount} old entries from plugin.log (kept {$keptLines} entries)");
+            $this->info("Log cleanup: Removed {$removedCount} old entries from plugin.log (kept {$keptCount} entries)");
             return true;
 
         } catch (\Exception $e) {

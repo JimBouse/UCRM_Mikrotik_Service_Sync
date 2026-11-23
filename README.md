@@ -391,6 +391,10 @@ For issues, enable debug logging and check:
 
 ## Version History
 
+### v1.2.80 (log cleanup)
+- Nightly log trim drops everything above the first `[YYYY-MM-DD ...]` line still within 48 hours, including undated stack-trace lines
+- Cleanup summary now reports the kept line count instead of `Array`
+
 ### v1.2.79 (service.edit uses status)
 - `service.edit` follows UCRM `entity.status` so a follow-up edit after `service.suspend` stays on `Service_Suspend`
 
