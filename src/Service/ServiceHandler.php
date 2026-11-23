@@ -56,7 +56,7 @@ class ServiceHandler
             self::STATUS_ACTIVE => 'Active',
             self::STATUS_SUSPENDED => 'Suspended',
             self::STATUS_ENDED => 'Ended',
-            default => 'Unknown',
+            default => 'Unknown (' . ($status ?? 'null') . ')',
         };
         $this->logger->debug("Service {$serviceId} has status [{$statusLabel}]");
 
@@ -77,20 +77,21 @@ class ServiceHandler
 
         $this->logger->debug("Found IP {$ipAddress} on host {$foundHost} for service {$serviceId}");
 
-        // Determine the target list based on event type
-        $targetList = $this->getTargetListForEvent($eventType, []);
+        // Determine the target list based on event type (service.edit uses entity status)
+        $targetList = $this->getTargetListForEvent($eventType, $status);
         if (!$targetList) {
             $this->logger->error("Could not determine target address list for event {$eventType}");
             return false;
         }
 
-        // Same MAC/Option 82 on an Active service wins over Ended/Suspended webhooks
-        if (in_array($eventType, ['service.end', 'service.archive', 'service.delete', 'service.suspend'], true)) {
+        // Same MAC/Option 82 on an Active service wins over Ended/Suspended
+        $eventStatus = $this->statusForEvent($eventType, $status);
+        if ($this->statusRank($eventStatus) < $this->statusRank(self::STATUS_ACTIVE)) {
             $preferred = $this->findPreferredServiceForSearchValue($searchValue);
             if (
                 $preferred !== null
                 && (int)$preferred['serviceId'] !== $serviceId
-                && $this->statusRank((int)$preferred['status']) > $this->statusRank($this->statusForEvent($eventType))
+                && $this->statusRank((int)$preferred['status']) > $this->statusRank($eventStatus)
             ) {
                 $this->logger->info(sprintf(
                     "Search value '%s' is also on service %d (status %d); ignoring %s for service %d",
@@ -475,18 +476,27 @@ class ServiceHandler
     }
 
     /**
-     * Get target address list based on event type
-     *
-     * @param string $eventType
-     * @param array $service
-     * @return string|null
+     * Get target address list based on event type.
+     * service.edit uses UCRM entity status so a follow-up edit after suspend
+     * stays on Service_Suspend instead of bouncing back to Active.
      */
-    private function getTargetListForEvent(string $eventType, array $service): ?string
+    private function getTargetListForEvent(string $eventType, ?int $status): ?string
     {
-        $status = $service['status'] ?? null;
+        if ($eventType === 'service.edit') {
+            if ($status === null) {
+                return $this->configManager->getServiceActiveListName();
+            }
+            $list = $this->getTargetListForStatus($status);
+            if ($list !== null) {
+                $this->logger->debug("service.edit using status {$status} -> {$list}");
+                return $list;
+            }
+            $this->logger->info("service.edit for status {$status} is not Active/Suspended; using Service_End");
+            return $this->configManager->getServiceEndListName();
+        }
 
         return match ($eventType) {
-            'service.add', 'service.edit', 'service.postpone', 'service.suspend_cancel' =>
+            'service.add', 'service.postpone', 'service.suspend_cancel' =>
                 $this->configManager->getServiceActiveListName(),
             'service.suspend' =>
                 $this->configManager->getServiceSuspendListName(),
@@ -525,8 +535,12 @@ class ServiceHandler
         };
     }
 
-    private function statusForEvent(string $eventType): int
+    private function statusForEvent(string $eventType, ?int $status = null): int
     {
+        if ($eventType === 'service.edit' && $status !== null) {
+            return $status;
+        }
+
         return match ($eventType) {
             'service.suspend' => self::STATUS_SUSPENDED,
             'service.end', 'service.archive', 'service.delete' => self::STATUS_ENDED,

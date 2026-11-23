@@ -5,7 +5,7 @@
     "displayName": "Mikrotik Service Sync",
     "description": "Automatically synchronize UCRM service status with Mikrotik address lists for service suspension and activation using Mikrotik REST API. Processes webhooks for service events and runs daily sync to ensure all services are in the correct state.",
     "url": "https://github.com/JimBouse/UCRM_Mikrotik_Service_Sync",
-    "version": "1.2.78",
+    "version": "1.2.79",
     "author": "Jim Bouse - jimbouse.com",
     "unmsVersionCompliancy": {
       "min": "2.1.0",

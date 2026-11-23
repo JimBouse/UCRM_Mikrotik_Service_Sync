@@ -167,7 +167,7 @@ The plugin listens for and processes these UCRM service events:
 | Event | Action | Target List |
 |-------|--------|-------------|
 | `service.add` | New service created | Service_Active |
-| `service.edit` | Service edited | Depends on new status |
+| `service.edit` | Service edited | From `entity.status`: 1 Active, 3 Suspend, 2 (and other non-active) End. UCRM often sends suspend then edit; the edit must not bounce them back to Active. |
 | `service.postpone` | Service postponed | Service_Active |
 | `service.suspend` | Service suspended (non-payment) | Service_Suspend |
 | `service.suspend_cancel` | Suspension cancelled | Service_Active |
@@ -390,6 +390,9 @@ For issues, enable debug logging and check:
 3. Mikrotik logs for API errors
 
 ## Version History
+
+### v1.2.79 (service.edit uses status)
+- `service.edit` follows UCRM `entity.status` so a follow-up edit after `service.suspend` stays on `Service_Suspend`
 
 ### v1.2.78 (Active supersedes Ended)
 - When the same device identifier is on multiple services, nightly sync and end/suspend webhooks keep **Active** over Suspended/Ended
