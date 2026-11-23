@@ -21,6 +21,7 @@ Automatically synchronize UCRM service status with Mikrotik address lists for se
   - `Service_Unknown`: All remaining and *unknown* DHCP lease entries are added to this list to catch stragglers.
 - **Automatically Create PCQ Queues**: Automatically build speed queues for each speed package in UCRM
 - **Nightly DHCP Reservations**: Converts dynamic DHCP leases to static reservations and removes leases last seen more than a configurable number of days (default 7)
+- **Active wins on shared devices**: If the same MAC / Option 82 value is on more than one UCRM service, Active outranks Suspended and Ended (a later Active service is not left on `Service_End`)
 
 - **Multi-Mikrotik Support**: Multiple headend routers can be managed from one UCRM instance.  Since it is based on the DHCP leases, each address list entry is applied to only the mikrotik router it should be on.
 
@@ -389,6 +390,9 @@ For issues, enable debug logging and check:
 3. Mikrotik logs for API errors
 
 ## Version History
+
+### v1.2.78 (Active supersedes Ended)
+- When the same device identifier is on multiple services, nightly sync and end/suspend webhooks keep **Active** over Suspended/Ended
 
 ### v1.2.77 (First-run DHCP script)
 - After import, wait until `/system script update_dhcp_leases` exists before running it (first nightly used to skip the run)

@@ -84,6 +84,34 @@ class ServiceHandler
             return false;
         }
 
+        // Same MAC/Option 82 on an Active service wins over Ended/Suspended webhooks
+        if (in_array($eventType, ['service.end', 'service.archive', 'service.delete', 'service.suspend'], true)) {
+            $preferred = $this->findPreferredServiceForSearchValue($searchValue);
+            if (
+                $preferred !== null
+                && (int)$preferred['serviceId'] !== $serviceId
+                && $this->statusRank((int)$preferred['status']) > $this->statusRank($this->statusForEvent($eventType))
+            ) {
+                $this->logger->info(sprintf(
+                    "Search value '%s' is also on service %d (status %d); ignoring %s for service %d",
+                    $searchValue,
+                    $preferred['serviceId'],
+                    $preferred['status'],
+                    $eventType,
+                    $serviceId
+                ));
+                $targetList = $this->getTargetListForStatus((int)$preferred['status']);
+                if (!$targetList) {
+                    $this->logger->error("Could not determine target address list for preferred service {$preferred['serviceId']}");
+                    return false;
+                }
+                $clientId = (int)$preferred['clientId'];
+                $serviceId = (int)$preferred['serviceId'];
+                $status = (int)$preferred['status'];
+                $serviceData = $preferred;
+            }
+        }
+
         // Build comment
         $comment = sprintf(
             'Client ID: %d, Service ID: %d, Search Value: %s',
@@ -272,13 +300,7 @@ class ServiceHandler
                 'trafficShapingOverrideEnabled' => $service['trafficShapingOverrideEnabled'] ?? null,
                 'trafficShapingOverrideEnd' => $service['trafficShapingOverrideEnd'] ?? null,
             ];
-            $servicesBySearchValue[$searchValue] = $serviceRecord;
-
-            // Also index MAC-style values without separators (78:45:.. vs 7845..)
-            $normalized = Option82Helper::normalizeForCompare($searchValue);
-            if ($normalized !== '' && !isset($servicesBySearchValue[$normalized])) {
-                $servicesBySearchValue[$normalized] = $serviceRecord;
-            }
+            $this->indexServiceBySearchValue($servicesBySearchValue, $serviceRecord);
 
             $matchCount++;
         }
@@ -488,6 +510,120 @@ class ServiceHandler
             self::STATUS_ENDED => $this->configManager->getServiceEndListName(),
             default => null,
         };
+    }
+
+    /**
+     * Active outranks Suspended, which outranks Ended. Same status: later service ID wins.
+     */
+    private function statusRank(int $status): int
+    {
+        return match ($status) {
+            self::STATUS_ACTIVE => 3,
+            self::STATUS_SUSPENDED => 2,
+            self::STATUS_ENDED => 1,
+            default => 0,
+        };
+    }
+
+    private function statusForEvent(string $eventType): int
+    {
+        return match ($eventType) {
+            'service.suspend' => self::STATUS_SUSPENDED,
+            'service.end', 'service.archive', 'service.delete' => self::STATUS_ENDED,
+            default => self::STATUS_ACTIVE,
+        };
+    }
+
+    /**
+     * @param array{serviceId:int,status:int} $left
+     * @param array{serviceId:int,status:int} $right
+     */
+    private function pickPreferredService(array $left, array $right): array
+    {
+        $leftRank = $this->statusRank((int)$left['status']);
+        $rightRank = $this->statusRank((int)$right['status']);
+        if ($rightRank !== $leftRank) {
+            return $rightRank > $leftRank ? $right : $left;
+        }
+
+        return ((int)$right['serviceId'] > (int)$left['serviceId']) ? $right : $left;
+    }
+
+    /**
+     * @return string[]
+     */
+    private function searchKeysForRecord(array $record): array
+    {
+        $searchValue = (string)($record['searchValue'] ?? '');
+        $keys = [];
+        if ($searchValue !== '') {
+            $keys[] = $searchValue;
+        }
+        $normalized = Option82Helper::normalizeForCompare($searchValue);
+        if ($normalized !== '' && $normalized !== $searchValue) {
+            $keys[] = $normalized;
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Index a service by its search value. If the same device is on multiple services,
+     * keep Active over Suspended over Ended (and the later service when status ties).
+     */
+    private function indexServiceBySearchValue(array &$map, array $record): void
+    {
+        $candidates = [$record];
+        foreach ($this->searchKeysForRecord($record) as $key) {
+            if (isset($map[$key]) && (int)$map[$key]['serviceId'] !== (int)$record['serviceId']) {
+                $candidates[] = $map[$key];
+            }
+        }
+
+        $winner = $candidates[0];
+        foreach (array_slice($candidates, 1) as $other) {
+            $previous = $winner;
+            $winner = $this->pickPreferredService($winner, $other);
+            if ((int)$winner['serviceId'] !== (int)$previous['serviceId']) {
+                $this->logger->info(sprintf(
+                    "Search value '%s': service %d (status %d) supersedes service %d (status %d)",
+                    $record['searchValue'],
+                    $winner['serviceId'],
+                    $winner['status'],
+                    $previous['serviceId'],
+                    $previous['status']
+                ));
+            }
+        }
+
+        foreach ($candidates as $candidate) {
+            foreach ($this->searchKeysForRecord($candidate) as $key) {
+                $map[$key] = $winner;
+            }
+        }
+        foreach ($this->searchKeysForRecord($winner) as $key) {
+            $map[$key] = $winner;
+        }
+    }
+
+    /**
+     * Preferred UCRM service for a device identifier (Active beats Ended/Suspended).
+     */
+    private function findPreferredServiceForSearchValue(string $searchValue): ?array
+    {
+        $indexed = $this->fetchAllServicesAsArray();
+        $keys = [$searchValue];
+        $normalized = Option82Helper::normalizeForCompare($searchValue);
+        if ($normalized !== '' && $normalized !== $searchValue) {
+            $keys[] = $normalized;
+        }
+        foreach ($keys as $key) {
+            if (isset($indexed[$key])) {
+                return $indexed[$key];
+            }
+        }
+
+        return null;
     }
 
     /**
